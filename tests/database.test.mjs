@@ -1,0 +1,24 @@
+import test from 'node:test';import assert from 'node:assert/strict';import {PGlite} from '@electric-sql/pglite';import {readFile} from 'node:fs/promises';
+const db=new PGlite();
+await db.exec(`create role anon;create role authenticated;create role service_role bypassrls;create schema auth;create table auth.users(id uuid primary key);insert into auth.users values('00000000-0000-0000-0000-000000000001'),('00000000-0000-0000-0000-000000000002'),('00000000-0000-0000-0000-000000000003');`);
+const migration=(await readFile(new URL('../supabase/migrations/202610230001_afririse.sql',import.meta.url),'utf8')).replace('create extension if not exists pgcrypto;','');await db.exec(migration);
+await db.exec(`insert into staff_members(user_id,role) values('00000000-0000-0000-0000-000000000001','owner'),('00000000-0000-0000-0000-000000000002','finance'),('00000000-0000-0000-0000-000000000003','editor');`);
+const [{id:campaignId}]=(await db.query('select id from campaigns')).rows;
+const owner='00000000-0000-0000-0000-000000000001',finance='00000000-0000-0000-0000-000000000002',editor='00000000-0000-0000-0000-000000000003';
+const action=async(actor,kind,data)=>(await db.query('select admin_action($1,$2,$3::jsonb) result',[actor,kind,JSON.stringify(data)])).rows[0].result;
+test('operational tables use RLS and no client-role table grants',async()=>{const tables=(await db.query("select relname,relrowsecurity from pg_class where relnamespace='public'::regnamespace and relkind='r'")).rows;assert.ok(tables.every(t=>t.relrowsecurity));const grants=(await db.query("select * from information_schema.role_table_grants where table_schema='public' and grantee in ('anon','authenticated')")).rows;assert.equal(grants.length,0)});
+test('campaigns are USD-only and cannot accept gifts with incomplete disclosures',async()=>{await assert.rejects(db.query("insert into campaigns(slug,title,goal_cents,currency) values('bad','Bad',100,'NGN')"));await assert.rejects(action(owner,'save_campaign',{id:campaignId,slug:'founding-fund',title:'Fund',goal_cents:50000000,status:'published',accepting_donations:true}));const [{accepting_donations}]=(await db.query('select accepting_donations from campaigns')).rows;assert.equal(accepting_donations,false)});
+test('financial roles and separate expense approval are enforced in database',async()=>{await assert.rejects(action(editor,'submit_expense',{campaign_id:campaignId,description:'Tools',amount_cents:1000}));const expense=await action(finance,'submit_expense',{campaign_id:campaignId,description:'Tools',amount_cents:1000});await assert.rejects(action(finance,'approve_expense',{id:expense.id}));await action(owner,'approve_expense',{id:expense.id});assert.equal((await db.query('select status from expenses where id=$1',[expense.id])).rows[0].status,'approved')});
+test('payment and receipt writes are atomic and duplicate deliveries/charges are idempotent',async()=>{
+ await db.exec(`update campaigns set status='published',accepting_donations=true;`);
+ const args=['10000000-0000-0000-0000-000000000001',campaignId,2500,'once','donor@example.com','Donor',true,false,'draft-1'];
+ const reserve=async a=>(await db.query('select reserve_donation($1,$2,$3,$4,$5,$6,$7,$8,$9) result',a)).rows[0].result;
+ const intent=await reserve(args),again=await reserve(args);assert.equal(intent.id,again.id);await assert.rejects(reserve([...args.slice(0,2),2600,...args.slice(3)]));
+ const e={event_id:'evt_1',event_type:'collection.succeeded',occurred_at:new Date().toISOString(),reference:intent.id,charge_id:'charge_1',currency:'USD',amount_cents:2500,fee_cents:100};
+ const process=async e=>(await db.query('select process_bachs_event($1::jsonb) result',[JSON.stringify(e)])).rows[0].result;
+ await process(e);assert.equal((await process(e)).duplicate,true);await process({...e,event_id:'evt_2'});
+ assert.equal((await db.query('select count(*)::int n from payments')).rows[0].n,1);assert.equal((await db.query('select count(*)::int n from receipts')).rows[0].n,1);
+ await process({...e,event_id:'evt_3',event_type:'collection.failed',occurred_at:'2020-01-01T00:00:00Z'});assert.equal((await db.query('select status from donation_intents where id=$1',[intent.id])).rows[0].status,'paid');
+});
+test('content approval requires another reviewer and a consent reference',async()=>{const post=await action(owner,'submit_content',{title:'Story',body:'Participant story',consent_reference:'consent-123'});await assert.rejects(action(owner,'approve_content',{id:post.id}));const post2=await action(editor,'submit_content',{title:'Story',body:'Participant story',consent_reference:'consent-456'});await action(owner,'approve_content',{id:post2.id});assert.equal((await db.query('select status from content_submissions where id=$1',[post2.id])).rows[0].status,'approved')});
+test.after(async()=>await db.close());

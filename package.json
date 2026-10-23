@@ -1,0 +1,23 @@
+{
+  "name": "afririse",
+  "version": "1.0.0",
+  "description": "Static responsive donor website. Open dist/index.html through a static HTTP server.",
+  "main": "index.js",
+  "directories": {
+    "test": "tests"
+  },
+  "scripts": {
+    "dev": "node scripts/serve.mjs",
+    "test": "node --test tests/*.test.mjs",
+    "typecheck": "tsc --noEmit"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "module",
+  "devDependencies": {
+    "@electric-sql/pglite": "^0.5.11",
+    "typescript": "^7.0.2"
+  },
+  "private": true
+}

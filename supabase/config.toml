@@ -1,0 +1,4 @@
+project_id = "afririse"
+[functions.afririse-api]
+verify_jwt = false
+# Public checkout + Bachs signatures. Admin routes validate Supabase JWT and AAL2 themselves.
