@@ -20,7 +20,9 @@ const server = createServer(async (request, response) => {
   }
 
   try {
-    const pathname = decodeURIComponent(new URL(request.url, 'http://localhost').pathname);
+    const requestedPath = decodeURIComponent(new URL(request.url, 'http://localhost').pathname);
+    // Keep clean public URLs while retaining the static HTML files as build artifacts.
+    const pathname = requestedPath === '/admin' || requestedPath === '/admin/' ? '/admin.html' : requestedPath;
     let filePath = resolve(root, `.${pathname}`);
     if (filePath !== root && !filePath.startsWith(`${root}${sep}`)) {
       response.writeHead(403).end('Forbidden');

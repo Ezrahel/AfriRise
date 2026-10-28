@@ -3,6 +3,7 @@ declare const Deno: {env:{get(name:string):string|undefined};serve(handler:(requ
 const env=(key:string)=>Deno.env.get(key)||'';
 const base=()=>env('SUPABASE_URL').replace(/\/$/,'');
 const origin=()=>env('SITE_ORIGIN').replace(/\/$/,'');
+const allowedOrigins=()=>[origin(),env('LOCAL_SITE_ORIGIN').replace(/\/$/,'')].filter(Boolean);
 const headers=()=>({'apikey':env('SUPABASE_SERVICE_ROLE_KEY'),'Authorization':`Bearer ${env('SUPABASE_SERVICE_ROLE_KEY')}`,'Content-Type':'application/json'});
 async function db(path:string,method='GET',body?:unknown){
  const r=await fetch(`${base()}/rest/v1/${path}`,{method,headers:{...headers(),Prefer:'return=representation'},...(body===undefined?{}:{body:JSON.stringify(body)})});
@@ -14,7 +15,7 @@ async function bachs(path:string,method='GET',body?:unknown,idempotency?:string)
  const r=await fetch(api+path,{method,headers:{Authorization:`Bearer ${env('BACHS_API_KEY')}`,'Content-Type':'application/json',...(idempotency?{'Idempotency-Key':idempotency}:{})},...(body===undefined?{}:{body:JSON.stringify(body)}),signal:AbortSignal.timeout(15000)});
  if(!r.ok)throw new HttpError(502,'Bachs could not complete the request. Please retry the same selection.');const value=await r.json();return value.data??value;
 }
-function json(value:unknown,status=200,request?:Request){return new Response(JSON.stringify(value),{status,headers:{'Content-Type':'application/json','Cache-Control':'no-store','X-Content-Type-Options':'nosniff',...(request&&request.headers.get('origin')===origin()?{'Access-Control-Allow-Origin':origin(),'Vary':'Origin'}:{})}})}
+function json(value:unknown,status=200,request?:Request){const requestOrigin=request?.headers.get('origin')||'';return new Response(JSON.stringify(value),{status,headers:{'Content-Type':'application/json','Cache-Control':'no-store','X-Content-Type-Options':'nosniff',...(allowedOrigins().includes(requestOrigin)?{'Access-Control-Allow-Origin':requestOrigin,'Vary':'Origin'}:{})}})}
 function configured(){return !!(base()&&env('SUPABASE_SERVICE_ROLE_KEY')&&origin())}
 async function body(request:Request){const text=await request.text();if(text.length>20000)throw new HttpError(413,'Request too large.');try{return JSON.parse(text)}catch{throw new HttpError(400,'Invalid JSON.')}}
 async function admin(request:Request){
@@ -23,6 +24,22 @@ async function admin(request:Request){
  const user=await response.json();let claims;try{claims=JSON.parse(atob(token.split('.')[1].replace(/-/g,'+').replace(/_/g,'/')))}catch{throw new HttpError(401,'Invalid session.')}
  if(claims.aal!=='aal2')throw new HttpError(403,'Verify your administrator MFA code first.');
  const members=await db(`staff_members?user_id=eq.${encodeURIComponent(user.id)}&select=role`);if(!members.length)throw new HttpError(403,'Staff access required.');return {id:user.id,role:members[0].role};
+}
+type DataRow=Record<string,unknown>;
+const number=(value:unknown)=>Number(value||0);
+function dashboard(rows:Record<string,DataRow[]>){
+ const payments=rows.payments||[], intents=rows.donation_intents||[], expenses=rows.expenses||[];
+ const sum=(items:DataRow[],field:string)=>items.reduce((total,item)=>total+number(item[field]),0);
+ const paid=payments.length, gross=sum(payments,'amount_cents'), fees=sum(payments,'fee_cents'), refunded=sum(payments,'refunded_cents');
+ const byDay=new Map<string,number>();
+ for(let i=6;i>=0;i--){const d=new Date();d.setUTCHours(0,0,0,0);d.setUTCDate(d.getUTCDate()-i);byDay.set(d.toISOString().slice(0,10),0)}
+ for(const payment of payments){const key=String(payment.created_at||'').slice(0,10);if(byDay.has(key))byDay.set(key,(byDay.get(key)||0)+number(payment.amount_cents)-number(payment.refunded_cents))}
+ const activity=[
+  ...(rows.audit_log||[]).map(x=>({kind:'staff',title:String(x.action).replaceAll('_',' '),at:x.created_at,detail:'Administrative action recorded'})),
+  ...(rows.webhook_events||[]).map(x=>({kind:'webhook',title:String(x.event_type).replaceAll('_',' '),at:x.created_at,detail:`Provider event: ${x.status}`})),
+  ...(rows.support_requests||[]).map(x=>({kind:'support',title:`${x.kind} request`,at:x.created_at,detail:`Request is ${x.status}`}))
+ ].sort((a,b)=>String(b.at).localeCompare(String(a.at))).slice(0,12);
+ return {metrics:{campaigns:(rows.campaigns||[]).length,liveCampaigns:(rows.campaigns||[]).filter(x=>x.status==='published'&&x.accepting_donations===true).length,paidPayments:paid,grossCents:gross,feesCents:fees,refundedCents:refunded,netCents:gross-fees-refunded,pendingIntents:intents.filter(x=>x.status==='pending').length,reviewIntents:intents.filter(x=>x.status==='review').length,openExpenses:expenses.filter(x=>x.status==='submitted').length,openSupport:(rows.support_requests||[]).filter(x=>x.status==='open').length,webhookReview:(rows.webhook_events||[]).filter(x=>x.status==='review'||x.status==='unmatched').length},revenue:[...byDay].map(([date,cents])=>({date,cents})),activity};
 }
 async function webhook(request:Request){
  const raw=await request.text();if(raw.length>1000000)throw new HttpError(413,'Request too large.');
@@ -46,10 +63,10 @@ async function webhook(request:Request){
 export async function handler(request:Request):Promise<Response>{
  try{
   const url=new URL(request.url),path=url.pathname.split('/afririse-api')[1]||'/';
-  if(request.method==='OPTIONS')return new Response(null,{status:204,headers:{'Access-Control-Allow-Origin':origin(),'Access-Control-Allow-Methods':'GET,POST,OPTIONS','Access-Control-Allow-Headers':'authorization,content-type,idempotency-key','Vary':'Origin'}});
+  if(request.method==='OPTIONS'){const requestOrigin=request.headers.get('origin')||'';if(!allowedOrigins().includes(requestOrigin))throw new HttpError(403,'Origin is not allowed.');return new Response(null,{status:204,headers:{'Access-Control-Allow-Origin':requestOrigin,'Access-Control-Allow-Methods':'GET,POST,OPTIONS','Access-Control-Allow-Headers':'authorization,content-type,idempotency-key','Vary':'Origin'}})}
   if(!configured())throw new HttpError(503,'AfriRise services are not configured yet.');
   if(path==='/webhook'&&request.method==='POST')return await webhook(request);
-  if(request.headers.get('origin')&&request.headers.get('origin')!==origin())throw new HttpError(403,'Origin is not allowed.');
+  if(request.headers.get('origin')&&!allowedOrigins().includes(request.headers.get('origin')||''))throw new HttpError(403,'Origin is not allowed.');
   if(path==='/config')return json({currency:'USD',provider:'Bachs',mode:env('BACHS_MODE')||'sandbox',paymentsEnabled:env('PAYMENTS_ENABLED')==='true'&&!!env('BACHS_API_KEY')&&env('BACHS_APPROVED')==='true',monthlyEnabled:!!env('BACHS_MONTHLY_PRODUCT_ID')},200,request);
   if(path==='/campaigns'&&request.method==='GET')return json(await db('campaigns?status=eq.published&select=id,slug,title,goal_cents,currency,activities,beneficiaries,location,eligibility,selection_process,budget,timeline,underfunding,excess_funds,delivery_impossible,update_schedule,refunds,cancellation,privacy,safeguarding,complaints,support_email,terms_version,accepting_donations&order=created_at'),200,request);
   if(path==='/checkout'&&request.method==='POST'){
@@ -85,6 +102,16 @@ export async function handler(request:Request):Promise<Response>{
    if(path==='/admin/session')return json(staff,200,request);
    const resource=url.searchParams.get('resource')||'campaigns';
    const resources:Record<string,string[]>={owner:['campaigns','donation_intents','payments','receipts','expenses','reconciliations','milestones','content_submissions','audit_log','support_requests','webhook_events'],finance:['campaigns','donation_intents','payments','receipts','expenses','reconciliations','audit_log','support_requests','webhook_events'],editor:['campaigns','milestones','content_submissions']};
+   if(path==='/admin/dashboard'&&request.method==='GET'){
+    const fields:Record<string,string>={
+     campaigns:'id,title,status,accepting_donations,created_at',donation_intents:'status,amount_cents,frequency,created_at',payments:'amount_cents,fee_cents,refunded_cents,created_at',
+     expenses:'status,amount_cents,created_at',support_requests:'kind,status,created_at',webhook_events:'event_type,status,created_at',audit_log:'action,created_at'
+    };
+    const permitted=resources[staff.role]||[];
+    const names=Object.keys(fields).filter(name=>permitted.includes(name));
+    const results=await Promise.all(names.map(async name=>[name,await db(`${name}?select=${fields[name]}&order=created_at.desc&limit=500`)] as const));
+    return json(dashboard(Object.fromEntries(results) as Record<string,DataRow[]>),200,request);
+   }
    if(path==='/admin/records'&&request.method==='GET'){
     if(!resources[staff.role]?.includes(resource))throw new HttpError(403,'Your role cannot access this area.');
     const offset=Math.max(0,Math.min(100000,Number(url.searchParams.get('offset')||0)));if(!Number.isSafeInteger(offset))throw new HttpError(400,'Invalid offset.');
