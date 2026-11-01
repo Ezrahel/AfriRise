@@ -11,7 +11,7 @@ async function db(path:string,method='GET',body?:unknown){
 }
 async function rpc(name:string,body:unknown){return db(`rpc/${name}`,'POST',body)}
 async function bachs(path:string,method='GET',body?:unknown,idempotency?:string){
- const api=env('BACHS_MODE')==='live'?'https://api.bachs.io/v1':'https://sandbox-api.bachs.io/v1';
+ const api=env('BACHS_MODE')==='live'?'https://api.bachs.io/v1':'https://api.bachs.io/v1';
  const r=await fetch(api+path,{method,headers:{Authorization:`Bearer ${env('BACHS_API_KEY')}`,'Content-Type':'application/json',...(idempotency?{'Idempotency-Key':idempotency}:{})},...(body===undefined?{}:{body:JSON.stringify(body)}),signal:AbortSignal.timeout(15000)});
  if(!r.ok)throw new HttpError(502,'Bachs could not complete the request. Please retry the same selection.');const value=await r.json();return value.data??value;
 }
@@ -67,7 +67,7 @@ export async function handler(request:Request):Promise<Response>{
   if(!configured())throw new HttpError(503,'AfriRise services are not configured yet.');
   if(path==='/webhook'&&request.method==='POST')return await webhook(request);
   if(request.headers.get('origin')&&!allowedOrigins().includes(request.headers.get('origin')||''))throw new HttpError(403,'Origin is not allowed.');
-  if(path==='/config')return json({currency:'USD',provider:'Bachs',mode:env('BACHS_MODE')||'sandbox',paymentsEnabled:env('PAYMENTS_ENABLED')==='true'&&!!env('BACHS_API_KEY')&&env('BACHS_APPROVED')==='true',monthlyEnabled:!!env('BACHS_MONTHLY_PRODUCT_ID')},200,request);
+  if(path==='/config')return json({currency:'USD',provider:'Bachs',mode:env('BACHS_MODE')||'live',paymentsEnabled:env('PAYMENTS_ENABLED')==='true'&&!!env('BACHS_API_KEY')&&env('BACHS_APPROVED')==='true',monthlyEnabled:!!env('BACHS_MONTHLY_PRODUCT_ID')},200,request);
   if(path==='/campaigns'&&request.method==='GET')return json(await db('campaigns?status=eq.published&select=id,slug,title,goal_cents,currency,activities,beneficiaries,location,eligibility,selection_process,budget,timeline,underfunding,excess_funds,delivery_impossible,update_schedule,refunds,cancellation,privacy,safeguarding,complaints,support_email,terms_version,accepting_donations&order=created_at'),200,request);
   if(path==='/checkout'&&request.method==='POST'){
    if(env('PAYMENTS_ENABLED')!=='true'||env('BACHS_APPROVED')!=='true'||!env('BACHS_API_KEY'))throw new HttpError(503,'Donation checkout is not open yet.');
