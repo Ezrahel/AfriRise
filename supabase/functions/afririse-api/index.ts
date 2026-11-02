@@ -3,7 +3,8 @@ declare const Deno: {env:{get(name:string):string|undefined};serve(handler:(requ
 const env=(key:string)=>Deno.env.get(key)||'';
 const base=()=>env('SUPABASE_URL').replace(/\/$/,'');
 const origin=()=>env('SITE_ORIGIN').replace(/\/$/,'');
-const allowedOrigins=()=>[origin(),env('LOCAL_SITE_ORIGIN').replace(/\/$/,'')].filter(Boolean);
+// LOCAL_SITE_ORIGIN may list several comma-separated origins (e.g. both localhost and 127.0.0.1).
+const allowedOrigins=()=>[origin(),...env('LOCAL_SITE_ORIGIN').split(',').map(o=>o.trim().replace(/\/$/,''))].filter(Boolean);
 const headers=()=>({'apikey':env('SUPABASE_SERVICE_ROLE_KEY'),'Authorization':`Bearer ${env('SUPABASE_SERVICE_ROLE_KEY')}`,'Content-Type':'application/json'});
 async function db(path:string,method='GET',body?:unknown){
  const r=await fetch(`${base()}/rest/v1/${path}`,{method,headers:{...headers(),Prefer:'return=representation'},...(body===undefined?{}:{body:JSON.stringify(body)})});
