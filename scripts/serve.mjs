@@ -42,6 +42,8 @@ const server = createServer(async (request, response) => {
 });
 
 const port = Number(process.env.PORT ?? 5173);
-server.listen(port, '127.0.0.1', () => {
-  console.log(`AfriRise is available at http://127.0.0.1:${port}`);
+// Containers must bind all interfaces (HOST=0.0.0.0); local development stays on loopback.
+const host = process.env.HOST ?? '127.0.0.1';
+server.listen(port, host, () => {
+  console.log(`AfriRise is available at http://${host}:${port}`);
 });

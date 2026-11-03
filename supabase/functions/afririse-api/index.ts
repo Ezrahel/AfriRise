@@ -62,6 +62,13 @@ async function webhook(request:Request){
  }
  const result=await rpc('process_bachs_event',{p_event:normalized});return json({received:true,result});
 }
+// Fallback for missed webhooks: ask Bachs for the intent's own checkout and record a verified success through the same SQL path.
+async function confirmCheckout(intent:{id:string;checkout_id:string|null}){
+ if(!intent.checkout_id||!env('BACHS_API_KEY'))return;
+ let s;try{s=await bachs(`/checkout-sessions/${encodeURIComponent(intent.checkout_id)}`)}catch{return}
+ const c=s?.charge;if(s?.checkout_id!==intent.checkout_id||s.reference!==intent.id||c?.status!=='succeeded'||!c.payment_id||c.currency!=='USD')return;
+ await rpc('process_bachs_event',{p_event:{event_id:`checkout-verify:${c.payment_id}`,event_type:'collection.succeeded',occurred_at:c.completed_at||s.completed_at||new Date().toISOString(),reference:intent.id,checkout_id:intent.checkout_id,subscription_id:c.subscription_id||null,charge_id:c.payment_id,currency:'USD',amount_cents:cents(c.amount_paid??c.amount),fee_cents:c.fees?.currency==='USD'?Math.round(Number(c.fees.amount||0)*100):null}});
+}
 export async function handler(request:Request):Promise<Response>{
  try{
   const url=new URL(request.url),path=url.pathname.split('/afririse-api')[1]||'/';
@@ -91,9 +98,11 @@ export async function handler(request:Request):Promise<Response>{
   }
   if(path==='/status'&&request.method==='POST'){
    const b=await body(request);if(typeof b.token!=='string'||!/^[a-f0-9-]{36}$/i.test(b.token))throw new HttpError(400,'Invalid confirmation token.');
-   const [intent]=await db(`donation_intents?status_token=eq.${b.token}&select=id,status,amount_cents,currency,frequency,campaign_id`);if(!intent)throw new HttpError(404,'Donation not found.');
+   let [intent]=await db(`donation_intents?status_token=eq.${b.token}&select=id,status,amount_cents,currency,frequency,campaign_id,checkout_id`);if(!intent)throw new HttpError(404,'Donation not found.');
+   if(intent.status==='pending'){await confirmCheckout(intent);[intent]=await db(`donation_intents?id=eq.${intent.id}&select=id,status,amount_cents,currency,frequency,campaign_id,checkout_id`)}
+   const {checkout_id:_,...publicIntent}=intent;
    const receipts=await db(`receipts?intent_id=eq.${intent.id}&select=receipt_number,amount_cents,currency,issued_at&order=issued_at.desc&limit=1`);
-   return json({...intent,receipt:receipts[0]||null},200,request);
+   return json({...publicIntent,receipt:receipts[0]||null},200,request);
   }
   if(path==='/request'&&request.method==='POST'){
    const b=await body(request);if(!['privacy','complaint','cancel_recurring'].includes(b.kind)||typeof b.email!=='string'||!/^\S+@\S+\.\S+$/.test(b.email)||b.email.length>254||typeof b.message!=='string'||b.message.length<10||b.message.length>4000||b.website)throw new HttpError(400,'Check your request details.');
